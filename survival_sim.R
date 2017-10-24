@@ -7,386 +7,665 @@
 
 rm(list=ls())
 
+#functions
 
 logit = function(x){log(x/(1-x))}
 expit = function(x){exp(x)/(1+exp(x))}
-
-
-
 
 #setseed
-
-
 set.seed(121915)
 
-#CJS simulation
+#libraries
+
+library(rjags)
+library(R2jags)
+library(coda)
+library(dclone)
+library(parallel)
+
+############################################################################################################################################################
+###
+### Multistate Mark Recapture with disease state
+###
+############################################################################################################################################################
+# 
+# s1= .6
+# s2 = .3
+# psi = .2 #transition probability from susceptible (neg) to infected (pos)
+# p1 = .25
+# p2 = .25
+# n.occasions = 5
+# n.states = 3
+# n.obs = 3
+# marked = matrix(NA,ncol=n.states,nrow = n.occasions)
+# marked[,1] = rep(100,n.occasions) #marked negative
+# marked[,2] = rep(30,n.occasions) #marked positive
+# marked[,3] = rep(0,n.occasions) #marked dead
+# 
+# 
+# # define matrices with survival, transition, and recapture probabilites
+# # this is a 4 dimensional matrix
+# # dimension 1: state of 'departure'
+# # dimension 2: state of 'arrival'
+# # dimension 3: individual
+# # dimension 4: time
+# 
+# #state process matrix
+# totrel = sum(marked)*(n.occasions-1)
+# PSI.STATE = array(NA,dim=c(n.states,n.states,totrel,n.occasions-1))
+# for(i in 1:totrel){
+#   for(t in 1:(n.occasions-1)){
+#     PSI.STATE[,,i,t] = matrix(c(s1*(1-psi),s1*psi,1-s1,0,s2,1-s2,0,0,1),nrow=n.states,byrow=TRUE)
+#   }
+# }
+# 
+# p1=c(.25,0,0,0,1)
+# 
+# 
+# #observation process matrix
+# PSI.OBS = array(NA,dim=c(n.states,n.obs,totrel,n.occasions-1))
+# for(i in 1:totrel){
+#   for(t in 1:(n.occasions-1)){
+#     PSI.OBS[,,i,t] = matrix(c(p1,0,1-p1,0,p2,1-p2,0,0,1),nrow=n.states,byrow=TRUE)
+#   }
+# }
+# 
+# # Define function to simulate multistate capture-recapture data
+# simul.ms <- function(PSI.STATE, PSI.OBS, marked, unobservable = NA){
+#   # Unobservable: number of state that is unobservable
+#   n.occasions <- dim(PSI.STATE)[4] + 1
+#   CH <- CH.TRUE <- matrix(NA, ncol = n.occasions, nrow = sum(marked))
+#   # Define a vector with the occasion of marking
+#   mark.occ <- matrix(0, ncol = dim(PSI.STATE)[1], nrow = sum(marked))
+#   g <- colSums(marked)
+#   for (s in 1:dim(PSI.STATE)[1]){
+#     if (g[s]==0) next  # To avoid error message if nothing to replace
+#     mark.occ[(cumsum(g[1:s])-g[s]+1)[s]:cumsum(g[1:s])[s],s] <-
+#       rep(1:n.occasions, marked[1:n.occasions,s])
+#   } #s
+#   for (i in 1:sum(marked)){
+#     for (s in 1:dim(PSI.STATE)[1]){
+#       if (mark.occ[i,s]==0) next
+#       first <- mark.occ[i,s]
+#       CH[i,first] <- s
+#       CH.TRUE[i,first] <- s
+#     } #s
+#     for (t in (first+1):n.occasions){
+#       # Multinomial trials for state transitions
+#       if (first==n.occasions) next
+#       state <- which(rmultinom(1, 1, PSI.STATE[CH.TRUE[i,t-1],,i,t-1])==1)
+#       CH.TRUE[i,t] <- state
+#       # Multinomial trials for observation process
+#       event <- which(rmultinom(1, 1, PSI.OBS[CH.TRUE[i,t],,i,t-1])==1)
+#       CH[i,t] <- event
+#     } #t
+#   } #i
+#   # Replace the NA and the highest state number (dead) in the file by 0
+#   CH[is.na(CH)] <- 0
+#   CH[CH==dim(PSI.STATE)[1]] <- 0
+#   CH[CH==unobservable] <- 0
+#   id <- numeric(0)
+#   for (i in 1:dim(CH)[1]){
+#     z <- min(which(CH[i,]!=0))
+#     ifelse(z==dim(CH)[2], id <- c(id,i), id <- c(id))
+#   }
+#   return(list(CH=CH[-id,], CH.TRUE=CH.TRUE[-id,]))
+#   # CH: capture histories to be used
+#   # CH.TRUE: capture histories with perfect observation
+# }
+# 
+# #execute
+# 
+# ms.sim =  simul.ms(PSI.STATE,PSI.OBS,marked)
+# CH = ms.sim$CH
+# 
+# #compute vector with occasion of first capture
+# get.first=function(x)min(which(x!=0))
+# f = apply(CH,1,get.first)
+# 
+# # Recode CH matrix: note, a 0 is not allowed in WinBUGS!
+# # 1 = seen alive and neg, 2 = seen alive and pos, 3 = not seen
+# rCH <- CH          # Recoded CH
+# rCH[rCH==0] <- 3
+# 
+# # Specify model in JAGS language
+# sink("ms.disease.jags.R")
+# cat("
+# model {
+# 
+# # -------------------------------------------------
+# # Parameters
+# # s1: survival probability neg
+# # s2: survival probability pos
+# # psi: transition probability from neg to pos
+# # p1: recapture probability for neg
+# # p2: recapture probability for pos
+# # -------------------------------------------------
+# 
+# # -------------------------------------------------
+# # States (S):
+# # 1 alive at A
+# # 2 alive at B
+# # 3 dead
+# # Observations (O):  
+# # 1 seen neg 
+# # 2 seen pos
+# # 3 not seen
+# # -------------------------------------------------
+# 
+#   # Priors and constraints
+#   for (t in 1:(n.occasions-1)){
+#      s1[t] <- mean.s[1]
+#      s2[t] <- mean.s[2]
+#      psi[t] <- mean.psi
+#      p1[t] <- mean.p[1]
+#      p2[t] <- mean.p[2]
+#    }
+#   for (u in 1:2){
+#      mean.s[u] ~ dunif(0, 1)    # Priors for mean state-spec. survival
+#      mean.p[u] ~ dunif(0, 1)      # Priors for mean state-spec. recapture
+#   }
+#   mean.psi ~ dunif(0, 1)    # Priors for mean transitions
+# 
+#   # Define state-transition and observation matrices
+#    for (i in 1:nind){  
+#      # Define probabilities of state S(t+1) given S(t)
+#      for (t in f[i]:(n.occasions-1)){
+#       ps[1,i,t,1] <- s1[t] * (1-psi[t])
+#       ps[1,i,t,2] <- s1[t] * psi[t]
+#       ps[1,i,t,3] <- 1-s1[t]
+#       ps[2,i,t,1] <- 0 
+#       ps[2,i,t,2] <- s2[t]
+#       ps[2,i,t,3] <- 1-s2[t]
+#       ps[3,i,t,1] <- 0
+#       ps[3,i,t,2] <- 0
+#       ps[3,i,t,3] <- 1
+#   # Define probabilities of O(t) given S(t)
+#       po[1,i,t,1] <- p1[t]
+#       po[1,i,t,2] <- 0
+#       po[1,i,t,3] <- 1-p1[t]
+#       po[2,i,t,1] <- 0
+#       po[2,i,t,2] <- p2[t]
+#       po[2,i,t,3] <- 1-p2[t]
+#       po[3,i,t,1] <- 0
+#       po[3,i,t,2] <- 0
+#       po[3,i,t,3] <- 1
+#       } #t
+#    } #i
+#   # Likelihood 
+#   for (i in 1:nind){
+#      # Define latent state at first capture
+#      z[i,f[i]] <- y[i,f[i]]
+#      for (t in (f[i]+1):n.occasions){
+#         # State process: draw S(t) given S(t-1)
+#         z[i,t] ~ dcat(ps[z[i,t-1], i, t-1,])
+#         # Observation process: draw O(t) given S(t)
+#         y[i,t] ~ dcat(po[z[i,t], i, t-1,])
+#       } #t
+#    } #i
+# }
+# ",fill = TRUE)
+# sink()
+# 
+# # Function to create known latent states z
+# known.state.ms <- function(ms, notseen){
+#   # notseen: label for ?not seen?
+#   state <- ms
+#   state[state==notseen] <- NA
+#   for (i in 1:dim(ms)[1]){
+#     m <- min(which(!is.na(state[i,])))
+#     state[i,m] <- NA
+#   }
+#   return(state)
+# }
+# 
+# z.known = known.state.ms(rCH, 3)
+# 
+# # Function to create initial values for unknown z
+# ms.init.z <- function(ch, f, z.known){
+#   for(i in 1:dim(ch)[1]){
+#     for(t in 1:n.occasions){
+#       if(ch[i,t]==3)ch[i,t]=NA
+#     }
+#   }
+#   
+#   for(i in 1:dim(ch)[1]){
+#     for(t in f[i]:n.occasions){
+#       if(is.na(ch[i,t]))ch[i,t]=ch[i,t-1]
+#     }
+#   } 
+#   for (i in 1:dim(ch)[1]){ch[i,1:f[i]] <- NA}
+#   for(i in 1:dim(ch)[1]){
+#     for(t in 1:n.occasions){
+#       if(!is.na(z.known[i,t]))ch[i,t]=NA
+#     }
+#   }  
+#   return(ch)
+# }
+# 
+# 
+# z.init = ms.init.z(rCH, f,z.known)
+# 
+# # Bundle data
+# jags.data <- list(y = rCH, f = f, n.occasions = dim(rCH)[2], nind = dim(rCH)[1], z = z.known)
+# 
+# # Initial values
+# inits <- function(){list(mean.s = runif(2, 0, 1), mean.psi = runif(1, 0, 1), mean.p = runif(2, 0, 1), z = z.init)}  
+# 
+# # Parameters monitored
+# parameters <- c("mean.s", "mean.psi", "mean.p")
+# 
+# # MCMC settings
+# ni = 10000
+# nt = 1
+# nb = 5000
+# nc = 3
+# 
+# # Call JAGS from R (BRT 8 min)
+# ms.cwd <- jags(jags.data, inits, parameters, "ms.disease.jags.R", n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, working.directory = getwd())
+# print(ms.cwd, digits = 3)
+# 
+# traceplot(ms.cwd)
+# 
+# ms.cwd.fit=as.mcmc(ms.cwd)
+# gelman.diag(ms.cwd.fit)
+# 
+# dim(ms.cwd.fit[[1]])
+# 
+# print(ms.cwd)
+# 
 
 
-# Define parameter values
-n.occasions = 5 # number of capture occasions
-marked = rep(100, n.occasions-1) #annual number of newly marked individuals
-mark.occ = rep(1:length(marked),marked[1:length(marked)])#define a vector with marking occasion
-
-mark.occ
 
 
-#define 2 survival probabilities
-phi0=rep(0.45,n.occasions-1) #assume survival is .45 of healthy individuals
-phi1=rep(0.3,n.occasions-1) #assume survival is .3 of cwd individuals
-
-beta0 = logit(phi0)
-beta1 = logit(phi1) - beta0
-
-
-#probability of recapture
-p=rep(.25,n.occasions-1) #assume recapture probability is .25
-
-#disease status, 1 = cwd+
-#beta0+beta1*x
-psi=.3 #prevalence  = prob(cwd+)
-delta = .2 #transmission prob
-
-
-#Define matrix for Disease status, 1 = +, 0 = -
-CWD = matrix (0,ncol=n.occasions, nrow=sum(marked))
-
-
-for(i in 1:sum(marked)){
-  CWD[i,mark.occ[i]] =  rbinom(1,1,psi)
-  for(t in (mark.occ[i]+1):n.occasions){
-    if(CWD[i,t-1] == 1){
-      CWD[i,t]=1
-    }
-    else{
-      CWD[i,t] = rbinom(1,1,delta)
-    }
-  }
-}
+############################################################################################################################################################
+###
+### Multistate Mark Recapture with living disease state + dead disease state
+###
+############################################################################################################################################################
+# preliminaries
+# 
+# rm(list=ls())
+# 
+# #functions
+# 
+# logit = function(x){log(x/(1-x))}
+# expit = function(x){exp(x)/(1+exp(x))}
+# 
+# #setseed
+# set.seed(121915)
+# 
+# #libraries
+# 
+# library(rjags)
+# library(R2jags)
+# library(coda)
+# 
 
 
-#Define matrices with survival and recapture probabilities
-PHI = matrix (phi0,ncol=n.occasions, nrow=sum(marked))
-
-for(i in 1:sum(marked)){
-  for (t in 1:n.occasions){
-    if(CWD[i,t] == 1)PHI[i,t]=phi1
-  }
-}
-
-
-P = matrix (p,ncol=n.occasions, nrow=sum(marked))
-
-
-#Define function to simulate a capture history
-simul.cjs = function(PHI,P,marked){
-  n.occasions=dim(PHI)[2]+1
-  CH = matrix(0,ncol=n.occasions,nrow=sum(marked))
-  
-  #define a vector with marking occasion
-  mark.occ = rep(1:length(marked),marked[1:length(marked)])
-
-  #Fill the CH matrix
-  for (i in 1:sum(marked)){
-    CH[i,mark.occ[i]] = 1
-    if (mark.occ[i]==n.occasions) next
-    for(t in (mark.occ[i]+1):n.occasions){
+# Specify model in JAGS language
+sink("ms.disease.jags.R")
+cat("
+    model {
       
-      #Bernoulli random trial - does individual survive occassion
-      sur = rbinom(1,1,PHI[i,t-1])
-      if(sur==0)break
-      rp = rbinom(1,1,P[i,t-1])
-      if(rp==1)CH[i,t] = 1
-    }#t
-  }#i
-  return(CH)
-}
+      # -------------------------------------------------
+      # Parameters
+      # s1: survival probability neg
+      # s2: survival probability pos
+      # psi: transition probability from neg to pos
+      # p1: recapture probability for neg
+      # p2: recapture probability for pos
+      # -------------------------------------------------
+      
+      # -------------------------------------------------
+      # States (S):
+      # 1 alive neg
+      # 2 alive pos
+      # 3 dead neg
+      # 4 dead pos
+      # Observations (O):  
+      # 1 seen neg 
+      # 2 seen pos
+      # 3 dead recovered neg
+      # 4 dead recovered pos
+      # 3 not seen
+      # -------------------------------------------------
+        
+      # Priors and constraints
+      for (t in 1:(n.occasions-1)){
+        p1[t] ~ dunif(0,1)
+        p2[t] ~ dunif(0,1)
+        p3[t] ~ dunif(0,1)
+        p4[t] ~ dunif(0,1)
+      }
+      
+      s1 ~ dbeta(10,1) #annual survival cwd-
+      s2 ~ dbeta(1,10) #annual survival cwd+
+      psi ~ dunif(0, 1)    # Priors for disease state transition
+      
+      # Define state-transition and observation matrices
+      for (i in 1:nind){  
+        # Define probabilities of state S(t+1) given S(t)
+        for (t in f[i]:(n.occasions-1)){
+          ps[1,i,t,1] <- s1 * (1-psi)
+          ps[1,i,t,2] <- s1 * psi
+          ps[1,i,t,3] <- (1-s1)*(1-psi)
+          ps[1,i,t,4] <- (1-s1)*psi
+          
+          ps[2,i,t,1] <- 0 
+          ps[2,i,t,2] <- s2
+          ps[2,i,t,3] <- 0
+          ps[2,i,t,4] <- 1-s2
+          
+          ps[3,i,t,1] <- 0
+          ps[3,i,t,2] <- 0
+          ps[3,i,t,3] <- 1
+          ps[3,i,t,4] <- 0
+          
+          ps[4,i,t,1] <- 0
+          ps[4,i,t,2] <- 0
+          ps[4,i,t,3] <- 0
+          ps[4,i,t,4] <- 1
+          
+          # Define probabilities of O(t) given S(t)
+          po[1,i,t,1] <- p1[t]
+          po[1,i,t,2] <- 0
+          po[1,i,t,3] <- 0
+          po[1,i,t,4] <- 0
+          po[1,i,t,5] <- 1-p1[t]
+          
+          po[2,i,t,1] <- 0
+          po[2,i,t,2] <- p2[t]
+          po[2,i,t,3] <- 0
+          po[2,i,t,4] <- 0
+          po[2,i,t,5] <- 1-p2[t]
+          
+          po[3,i,t,1] <- 0
+          po[3,i,t,2] <- 0
+          po[3,i,t,3] <- p3[t]
+          po[3,i,t,4] <- 0
+          po[3,i,t,5] <- 1-p3[t]
+          
+          po[4,i,t,1] <- 0
+          po[4,i,t,2] <- 0
+          po[4,i,t,3] <- 0
+          po[4,i,t,4] <- p4[t]
+          po[4,i,t,5] <- 1-p4[t]
+        } #t
+      } #i
+  
+      # Likelihood 
 
-CH = simul.cjs(PHI,P,marked)
-
-
-#create vector with occassion of first marking
-get.first = function(x)min(which(x!=0))
-f = apply(CH,1,get.first)
- #note: f = mark.occ
-
-
-#specify model with jags code
-
-sink("cjs.jags.R")
-cat("
-    model{
-      #priors and constraints
-      for(i in 1:nind){
-        for(t in f[i]:(n.occasions-1)){
-          logit(phi[i,t]) <- beta0 + CWD[i,t]*beta1
-          p[i,t] <- mean.p
-        }#t
-      }#i
-
-      mean.p ~ dunif(0,1)
-      beta0 ~ dnorm(0,1)
-      beta1 ~ dnorm(0,1)
-
-      #likelihood
-      for(i in 1:nind){
-        z[i,f[i]] <- 1 #define latent state presence at first capture
-        for( t in (f[i]+1):n.occasions){
-          #state process
-          z[i,t] ~ dbern(mu1[i,t])
-          mu1[i,t] <- phi[i,t-1]*z[i,t-1]
-          #observation process
-          y[i,t] ~ dbern(mu2[i,t])
-          mu2[i,t] <-p[i,t-1]*z[i,t]
-
-        }#t
-
-      }#i
-
-  }#end model
-
-    
-",fill=TRUE)
+      for (i in 1:nind){
+        # Define latent state at first capture
+        z[i,f[i]] <- y[i,f[i]]
+        for (t in (f[i]+1):n.occasions){
+          # State process: draw S(t) given S(t-1)
+          z[i,t] ~ dcat(ps[z[i,t-1], i, t-1,])
+          # Observation process: draw O(t) given S(t)
+          y[i,t] ~ dcat(po[z[i,t], i, t-1,])
+        } #t
+      } #i
+    }
+    ",fill = TRUE)
 sink()
 
+# Write function to simulate data
 
-#set data
-data.jags = list(y=CH,f=f,nind=dim(CH)[1],n.occasions = dim(CH)[2],CWD = CWD)
 
-#create a matrix of initial values for latent state z
-
-known.state.cjs <- function(ch){
-  state <- ch
-  for (i in 1:dim(ch)[1]){
-    n1 <- min(which(ch[i,]==1))
-    n2 <- max(which(ch[i,]==1))
-    state[i,n1:n2] <- 1
-    state[i,n1] <- NA
+# Define function to simulate multistate capture-recapture data
+simul.ms <- function(PSI.STATE, PSI.OBS, marked, unobservable = NA){
+  
+  # Unobservable: number of state that is unobservable
+  n.occasions <- dim(PSI.STATE)[4] + 1
+  
+  CH <- CH.TRUE <- matrix(NA, ncol = n.occasions, nrow = sum(marked))
+  
+  # Define a vector with the occasion of marking
+  mark.occ <- matrix(0, ncol = dim(PSI.STATE)[1], nrow = sum(marked))
+  g <- colSums(marked)
+  for (s in 1:dim(PSI.STATE)[1]){
+    if (g[s]==0) next  # To avoid error message if nothing to replace
+    mark.occ[(cumsum(g[1:s])-g[s]+1)[s]:cumsum(g[1:s])[s],s] <-
+      rep(1:n.occasions, marked[1:n.occasions,s])
+  } #s
+  for (i in 1:sum(marked)){
+    for (s in 1:dim(PSI.STATE)[1]){
+      if (mark.occ[i,s]==0) next
+      first <- mark.occ[i,s]
+      CH[i,first] <- s
+      CH.TRUE[i,first] <- s
+    } #s
+    for (t in (first+1):n.occasions){
+      # Multinomial trials for state transitions
+      if (first==n.occasions) next
+      state <- which(rmultinom(1, 1, PSI.STATE[CH.TRUE[i,t-1],,i,t-1])==1)
+      CH.TRUE[i,t] <- state
+      # Multinomial trials for observation process
+      event <- which(rmultinom(1, 1, PSI.OBS[CH.TRUE[i,t],,i,t-1])==1)
+      CH[i,t] <- event
+    } #t
+  } #i
+  # Replace the NA and the highest state number (dead) in the file by 0
+  CH[is.na(CH)] <- 0
+  CH[CH==dim(PSI.STATE)[1]] <- 0
+  CH[CH==unobservable] <- 0
+  id <- numeric(0)
+  for (i in 1:dim(CH)[1]){
+    z <- min(which(CH[i,]!=0))
+    ifelse(z==dim(CH)[2], id <- c(id,i), id <- c(id))
   }
-  state[state==0] <- NA
+  return(list(CH=CH[-id,], CH.TRUE=CH.TRUE[-id,]))
+  # CH: capture histories to be used
+  # CH.TRUE: capture histories with perfect observation
+}
+
+
+# Function to create known latent states z
+known.state.ms <- function(ms, notseen){
+  # notseen: label for ?not seen?
+  state <- ms
+  state[state==notseen] <- NA
+  for (i in 1:dim(ms)[1]){
+    m <- min(which(!is.na(state[i,])))
+    state[i,m] <- NA
+  }
   return(state)
 }
 
 
-inits=function(){list( z = known.state.cjs(CH),mean.p = p[1], beta0 = beta0[1]+.05,beta1 = beta1[1]+.05)}
-parameters = c("mean.p","beta0","beta1")
-
-#MCMC settings
-ni=10000
-nt=1
-nb = 5000
-nc = 3
-
-model.fit = jags(data.jags, inits, parameters, "cjs.jags.R", n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, working.directory = getwd())
-
-print(model.fit,digits=3)
-
-############################################################################################################################################################
-###
-### Mark-Recovery survival model
-###
-############################################################################################################################################################
-
-rm(list=ls())
-
-
-logit = function(x){log(x/(1-x))}
-expit = function(x){exp(x)/(1+exp(x))}
-
-
-n.occasions = 4 #number of release occasions
-marked = rep(100,n.occasions) #annual number of marked individuals
-mark.occ = rep(1:n.occasions,marked)
-
-
-s = rep(.5,n.occasions) # true survival probability
-r = rep(.25,n.occasions) # recovery probability
-
-S = matrix(s,ncol=n.occasions,nrow=sum(marked))
-R = matrix(r,ncol=n.occasions,nrow=sum(marked))
-
-
-#define function to simulate mark-recovery data
-
-simul.mr = function(S,R,marked){
-  n.occasions = dim(S)[2]
-  MR = matrix(NA, ncol=n.occasions+1,nrow=sum(marked))
- 
-  #define vector of occassions marked
-  mark.occ = rep(1:n.occasions,marked)
-  
-  #Fill the MR matrix
-  for(i in 1:sum(marked)){
-     MR[i,mark.occ[i]]=1 #release/collared occasion
-    for(t in mark.occ[i]:n.occasions){
-      sur = rbinom(1,1,S[i,t])
-      if(sur==1)next #if still alive move to the next occasion
-      rp = rbinom(1,1,R[i,t])
-      if(rp==0){
-        MR[i,t+1] = 0
-        break
-      }
-      if(rp==1){
-        MR[i,t+1]=1
-        break
-      }
-      }#t
-    }#i
-  MR[which(is.na(MR))]=0
-  return(MR)    
-  
-}
-
-
-MR = simul.mr(S,R,marked)
-
-#Analysis of model
-
-get.first=function(x)min(which(x!=0))
-f = apply(MR,1,get.first)
-
-#Specify JAGS model
-sink("MR.JAGS.R")
-cat("
-  model{
-for (i in 1:nind){
-   for (t in f[i]:(n.occasions-1)){
-      s[i,t] <- mean.s
-      r[i,t] <- mean.r
-      } #t
-   } #i
-mean.s ~ dunif(0, 1)          # Prior for mean survival
-mean.r ~ dunif(0, 1)          # Prior for mean recapture
-
-#Likelihood
-for(i in 1:nind){
-  #Define latent state at first capture
-  z[i,f[i]] = 1
-  for(t in (f[i]+1):n.occasions){
-    #State process
-    z[i,t] ~ dbern(mu1[i,t])
-    mu1[i,t] <- s[i,t-1]*z[i,t-1]
-    
-    #Observation process
-
-    y[i,t] ~ dbern(mu2[i,t])
-    mu2[i,t] <- r[i,t-1]*(z[i,t-1]-z[i,t])
-  }#t
-}#i
-
-}#model
-
-
-",fill=TRUE)
-sink()
-
-
-
-# Define function to create a matrix with information about known latent state z
-known.state.mr <- function(mr){
-  state <- matrix(NA, nrow = dim(mr)[1], ncol = dim(mr)[2])
-  rec <- which(rowSums(mr)==2)
-  for (i in 1:length(rec)){
-    n1 <- min(which(mr[rec[i],]==1))
-    n2 <- max(which(mr[rec[i],]==1))
-    state[rec[i],n1:n2] <- 1
-    state[rec[i],n1] <- NA
-    state[rec[i],n2:dim(mr)[2]] <- 0
+# Function to create initial values for unknown z
+ms.init.z <- function(ch, f, z.known){
+  for(i in 1:dim(ch)[1]){
+    for(t in 1:n.occasions){
+      if(ch[i,t]==5)ch[i,t]=NA
+    }
   }
-  return(state)
-}
-
-# Bundle data
-data.jags <- list(y = MR, f = f, nind = dim(MR)[1], n.occasions = dim(MR)[2], z = known.state.mr(MR))
-
-# Define function to create a matrix of initial values for latent state z
-mr.init.z <- function(mr){
-  ch <- matrix(NA, nrow = dim(mr)[1], ncol = dim(mr)[2])
-  rec <- which(rowSums(mr)==1)
-  for (i in 1:length(rec)){
-    n1 <- which(mr[rec[i],]==1)
-    ch[rec[i],n1:dim(mr)[2]] <- 0
-    ch[rec[i],n1] <- NA
-  }
+  
+  for(i in 1:dim(ch)[1]){
+    for(t in f[i]:n.occasions){
+      if(is.na(ch[i,t]))ch[i,t]=ch[i,t-1]
+    }
+  } 
+  for (i in 1:dim(ch)[1]){ch[i,1:f[i]] <- NA}
+  for(i in 1:dim(ch)[1]){
+    for(t in 1:n.occasions){
+      if(!is.na(z.known[i,t]))ch[i,t]=NA
+    }
+  }  
   return(ch)
 }
 
-# Initial values
-inits <- function(){list(z = mr.init.z(MR), mean.s = runif(1, 0, 1), mean.r = runif(1, 0, 1))}  
-
-# Parameters monitored
-parameters <- c("mean.s", "mean.r")
-
-# MCMC settings
-ni <- 10000
-nt <- 1
-nb <- 5000
-nc <- 3
-
-mr.ss <- jags(data.jags, inits, parameters, "MR.JAGS.R", n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, working.directory = getwd())
-
-print(mr.ss, digits = 3)
 
 
 
+###
+### Define overall simulation function can change values of p1.true
+### returns draws from s1
+###
 
-### MR with disease dependent 
 
+simulation.survive=function(p1.true=.01){
+  n.occasions = 5
+  n.states = 4
+  n.obs = 5
+  s1= .6
+  s2 = .3
+  psi = .1 #transition probability from susceptible (neg) to infected (pos)
+  p1 = rep(p1.true,n.occasions-1)
+  p2 = rep(.01,n.occasions-1)
+  p3 = c(.25,0.25,.9,.9)
+  p4 = c(.25,.25,.9,.9)
+  marked = matrix(NA,ncol=n.states,nrow = n.occasions)
+  marked[,1] = rep(100,n.occasions) #marked negative,
+  marked[,2] = rep(30,n.occasions) #marked positive
+  marked[,3] = rep(0,n.occasions) #marked dead negative
+  marked[,4] = rep(0,n.occasions) #marked dead negative
+  
+  
+  # define matrices with survival, transition, and recapture probabilites
+  # this is a 4 dimensional matrix
+  # dimension 1: state of 'departure'
+  # dimension 2: state of 'arrival'
+  # dimension 3: individual
+  # dimension 4: time
+  
+  #state process matrix
+  totrel = sum(marked)*(n.occasions-1)
+  PSI.STATE = array(NA,dim=c(n.states,n.states,totrel,n.occasions-1))
+  for(i in 1:totrel){
+    for(t in 1:(n.occasions-1)){
+      PSI.STATE[,,i,t] = matrix(c(s1*(1-psi),s1*psi,(1-s1)*(1-psi),(1-s1)*psi,
+                                  0,s2,0,1-s2,
+                                  0,0,1,0,
+                                  0,0,0,1),nrow=n.states,byrow=TRUE)
+    }
+  }
+  
+  #observation process matrix
+  PSI.OBS = array(NA,dim=c(n.states,n.obs,totrel,n.occasions-1))
+  for(i in 1:totrel){
+    for(t in 1:(n.occasions-1)){
+      PSI.OBS[,,i,t] = matrix(c(p1[t],0,0,0,1-p1[t],
+                                0,p2[t],0,0,1-p2[t],
+                                0,0,p3[t],0,1-p3[t],
+                                0,0,0,p4[t],1-p4[t]),nrow=n.states,byrow=TRUE)
+    }
+  }
+  
+  
+  #execute simulation
+  
+  ms.dis.sim =  simul.ms(PSI.STATE,PSI.OBS,marked)
+  CH = ms.dis.sim$CH
+  
+  #calculate prevalence to make sure probability of transmission isn't off-base
+  # 
+  # alive.pos=which(ms.dis.sim$CH.TRUE==2,TRUE)
+  # alive.neg=which(ms.dis.sim$CH.TRUE==1,TRUE)
+  # prev.vec=c()
+  # for(t in 1:n.occasions){
+  #   prev.vec=c(prev.vec,sum(alive.pos[,2]==t)/(sum(alive.pos[,2]==t)+sum(alive.neg[,2]==t)))
+  # }
+  # prev.vec
+  
+  #compute vector with occasion of first capture
+  get.first=function(x)min(which(x!=0))
+  f = apply(CH,1,get.first)
+  
+  # 1 = seen alive and neg, 2 = seen alive and pos, 3,dead and neg, 4 dead and pos, 5 = not seen
+  rCH <- CH          # Recoded CH
+  rCH[rCH==0] <- 5
+  
+  #generating initial values
+  z.known = known.state.ms(rCH, 5)
+  z.init = ms.init.z(rCH, f,z.known)
 
-n.occasions = 5
+  # Bundle data
+  jags.data <- list(y = rCH, f = f, n.occasions = dim(rCH)[2], nind = dim(rCH)[1], z = z.known)
+  
+  
+  # Initial values
+# 
+#   inits1=list(s1=runif(1,.3,1),s2=runif(1,0,.4), psi = runif(1, 0, 1), p1=p1+.01,p2=p2+.01,p3=p3+.01,p4=p4+.01, z = z.init)
+#   inits2=list(s1=runif(1,.3,1),s2=runif(1,0,.4), psi = runif(1, 0, 1), p1=p1,p2=p2,p3=p3,p4=p4, z = z.init)
+#   inits3=list(s1=runif(1,.3,1),s2=runif(1,0,.4), psi = runif(1, 0, 1), p1=p1-.01,p2=p2-.01,p3=p3-.01,p4=p4-.01, z = z.init)
+#   
+  inits <- list(list(s1=runif(1,.3,1),s2=runif(1,0,.4), psi = runif(1, 0, 1), p1=rep(.1,4),p2=rep(.1,4),p3=rep(.1,4),p4=rep(.1,4), z = z.init),
+                             list(s1=runif(1,.3,1),s2=runif(1,0,.4), psi = runif(1, 0, 1), p1=rep(.3,4),p2=rep(.3,4),p3=rep(.3,4),p4=rep(.3,4), z = z.init),
+                             list(s1=runif(1,.3,1),s2=runif(1,0,.4), psi = runif(1, 0, 1), p1=rep(.2,4),p2=rep(.2,4),p3=rep(.2,4),p4=rep(.2,4), z = z.init))
 
-marked.neg = rep(70,n.occasions)
-marked.pos = rep(30,n.occasions)
+  
+  # Parameters monitore4
+  parameters <- c("s1","s2" ,"psi", "p1","p2","p3","p4")
+  
+  # MCMC settings
+  ni = 50000
+  nt = 1
+  nb = 10000
+  nc = 3
+  
+  # call parallel version of jags using dclone
+  cl=makeCluster(3)
+  ms.cwd=jags.parfit(cl, data=jags.data, params=parameters, model="ms.disease.jags.R",inits=inits,n.chains=nc,n.thin=nt,n.iter=ni,n.burnin=nb)
+  stopCluster(cl)
+  
+  # Call JAGS (Run Time 6 min) using R2jags
+  # ms.cwd <- jags(jags.data, inits, parameters, "ms.disease.jags.R", n.chains = 3, n.iter = 10000)
+  # gelman.diag(ms.cwd,multivariate = FALSE)
 
-s.neg = .6 #cwd- survival probability
-s.pos = .3 #cwd+ survival probability
+  ms.cwd.iter=as.data.frame(rbind(ms.cwd[[1]],ms.cwd[[2]],ms.cwd[[3]]))
 
-r.neg = .9 #cwd- recovery probability
-r.pos = .9 #cwd+ recovery probability 
+  return(list(fit.iter=ms.cwd.iter$s1))
+  
+}#end simulation call
 
-#lets assume half of the individuals get sick
-sneg=c(rep(s.neg,floor(n.occasions/2)),rep(spos,n.occasions-floor(n.occasions/2)))
-spos = rep(s.pos,n.occasions)
+p1.possible=c(0,.01,seq(0,1,by=.1)[-1])
 
-# Define matrices with survival and recovery probabilities
-SNEG <- matrix(0, ncol = n.occasions, nrow = sum(marked.neg))
-for (i in 1:length(marked.neg)){
-  SNEG[(sum(marked.neg[1:i])-marked.neg[i]+1):sum(marked.neg[1:i]),i:n.occasions] <- matrix(rep(sneg[1:(n.occasions-i+1)],marked.neg[i]), ncol = n.occasions-i+1, byrow = TRUE)
+out=matrix(NA,nrow=50000, ncol=length(p1.possible))
+
+for(i in 1:p1.possible){
+  
+out[,1] = simulation.survive(p1.possible[1])
+
 }
-head(SNEG)
-dim(SNEG)
+
+
+# Call JAGS from R (BRT 8 min)
+ms.cwd <- jags.(jags.data, inits, parameters, "ms.disease.jags.R", n.chains = 3, n.thin = 1, n.iter = 10000, n.burnin = 5000, n.cluster=3,working.directory = getwd())
 
 
 
-# 8.3.2. Age-dependent parameters
-n.occasions <- 5                   # Number of occasions
-marked.j <- rep(200, n.occasions)   # Annual number of newly marked young
-marked.a <- rep(20, n.occasions)    # Annual number of newly marked adults
-sjuv <- 0.3                         # Juvenile survival probability
-sad <- 0.8                          # Adult survival probability
-rjuv <- 0.25                        # Juvenile recovery probability
-rad <- 0.15                         # Adult recovery probability
-sj <- c(sjuv, rep(sad, n.occasions-1))
-rj <- c(rjuv, rep(rad, n.occasions-1))
+ms.cwd.mcmc=as.mcmc(ms.cwd)
+ms.cwd.iter=as.data.frame(rbind(ms.cwd.mcmc[[1]],ms.cwd.mcmc[[2]],ms.cwd.mcmc[[3]]))
+names(ms.cwd.iter)=c("deviance","psi","s1","s2","p11","p12","p13","p14","p21","p22","p23","p24","p31","p32","p33","p34","p41","p42","p43","p44")
 
-# Define matrices with survival and recovery probabilities
-SJ <- matrix(0, ncol = n.occasions, nrow = sum(marked.j))
-for (i in 1:length(marked.j)){
-  SJ[(sum(marked.j[1:i])-marked.j[i]+1):sum(marked.j[1:i]),i:n.occasions] <- matrix(rep(sj[1:(n.occasions-i+1)],marked.j[i]), ncol = n.occasions-i+1, byrow = TRUE)
-}
-head(SJ)
-dim(SJ)
+quantile(ms.cwd.iter$s1,.025)
+hist(ms.cwd.iter$s1,main=expression(s[1]),xlab=expression(s[1]))
+abline(v=s1,lwd=3,lty=2,col=2)
+abline(v=quantile(ms.cwd.iter$s1,.025),lwd=3,lty=2,col=2)
+abline(v=quantile(ms.cwd.iter$s1,.025),lwd=3,lty=2,col=2)
+print(ms.cwd.iter)
+
+psi
+s1
+s2
+p1
+p2
+p3
+p4
 
 
-SA <- matrix(sad, ncol = n.occasions, nrow = sum(marked.a))
-RJ <- matrix(0, ncol = n.occasions, nrow = sum(marked.j))
-for (i in 1:length(marked.j)){ 
-  RJ[(sum(marked.j[1:i])-marked.j[i]+1):sum(marked.j[1:i]),i:n.occasions] <- matrix(rep(rj[1:(n.occasions-i+1)],marked.j[i]), ncol = n.occasions-i+1, byrow = TRUE)
-}
-RA <- matrix(rad, ncol = n.occasions, nrow = sum(marked.a))
-# Execute simulation function
-MRj <- simul.mr(SJ, RJ, marked.j)
-MRa <- simul.mr(SA, RA, marked.a)
 
-# Summarize data in m-arrays
-marr.j <- marray.dead(MRj)
-marr.a <- marray.dead(MRa)
+
+traceplot(ms.cwd)
+
+ms.cwd.fit=as.mcmc(ms.cwd)
+gelman.diag(ms.cwd.fit)
+
+dim(ms.cwd.fit[[1]])
+
+print(ms.cwd)
+
+
+
